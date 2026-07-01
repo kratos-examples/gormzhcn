@@ -2,9 +2,9 @@ package biz
 
 import (
 	"context"
+	"log/slog"
 
-	"github.com/go-kratos/kratos/v2/errors"
-	"github.com/go-kratos/kratos/v2/log"
+	"github.com/go-kratos/kratos/v3/errors"
 	"github.com/yylego/gormcnm"
 	"github.com/yylego/gormrepo"
 	"github.com/yylego/gormrepo/gormclass"
@@ -27,14 +27,14 @@ type Student struct {
 type StudentUsecase struct {
 	data *data.Data
 	repo *gormrepo.Repo[models.T学生, *models.T学生Columns]
-	log  *log.Helper
+	log  *slog.Logger
 }
 
-func NewStudentUsecase(data *data.Data, logger log.Logger) *StudentUsecase {
+func NewStudentUsecase(data *data.Data, logger *slog.Logger) *StudentUsecase {
 	return &StudentUsecase{
 		data: data,
 		repo: gormrepo.NewRepo(gormclass.Use(&models.T学生{})),
-		log:  log.NewHelper(logger),
+		log:  logger,
 	}
 }
 

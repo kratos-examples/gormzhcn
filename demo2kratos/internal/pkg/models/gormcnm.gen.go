@@ -27,6 +27,7 @@ func (c *T文章) Columns() *T文章Columns {
 		DeletedAt: gormcnm.Cnm(c.DeletedAt, "deleted_at"),
 		V标题:       gormcnm.Cnm(c.V标题, "title"),
 		V内容:       gormcnm.Cnm(c.V内容, "content"),
+		V学生ID:     gormcnm.Cnm(c.V学生ID, "student_id"),
 	}
 }
 
@@ -40,4 +41,5 @@ type T文章Columns struct {
 	DeletedAt gormcnm.ColumnName[gorm.DeletedAt]
 	V标题       gormcnm.ColumnName[string]
 	V内容       gormcnm.ColumnName[string]
+	V学生ID     gormcnm.ColumnName[int64]
 }
