@@ -20,10 +20,10 @@ Code differences compared to source project.
  	httpServer := server.NewHTTPServer(confServer, articleService, logger)
 ```
 
-## internal/biz/article.go (+103 -129)
+## internal/biz/article.go (+125 -114)
 
 ```diff
-@@ -2,195 +2,169 @@
+@@ -2,146 +2,124 @@
  
  import (
  	"context"
@@ -242,22 +242,32 @@ Code differences compared to source project.
  }
  
  func (uc *ArticleUsecase) ListArticles(ctx context.Context, page int32, pageSize int32) ([]*Article, int32, *ebzkratos.Ebz) {
--	if page < 1 {
--		page = 1
--	}
--	if pageSize < 1 {
--		pageSize = 10
--	}
-+	db := uc.data.DB()
+@@ -152,28 +130,43 @@
+ 		pageSize = 10
+ 	}
  
 -	db := uc.data.DB().WithContext(ctx)
--
++	db := uc.data.DB()
+ 
 -	var total int64
 -	if err := db.Model(&Article{}).Count(&total).Error; err != nil {
 -		return nil, 0, ebzkratos.New(pb.ErrorDbError("count articles: %v", err))
-+	v文章们, err := uc.repo.With(ctx, db).Find(func(db *gorm.DB, cls *models.T文章Columns) *gorm.DB {
-+		return db.Order(cls.ID.Ob("DESC").Ox())
-+	})
++	// gormrepo FindPageAndCount replaces the stump's hand-written Count + Order + Offset + Limit
++	// with one typed call that returns the current page plus the total row count together.
++	// gormrepo 的 FindPageAndCount 把桩子里手写的 Count + Order + Offset + Limit
++	// 收敛成一个类型安全的调用：一次拿到当页数据和总行数
++	v文章们, total, err := uc.repo.With(ctx, db).FindPageAndCount(
++		func(db *gorm.DB, cls *models.T文章Columns) *gorm.DB {
++			return db
++		},
++		func(cls *models.T文章Columns) gormcnm.OrderByBottle {
++			return cls.ID.Ob("asc")
++		},
++		&gormrepo.Pagination{
++			Offset: int((page - 1) * pageSize),
++			Limit:  int(pageSize),
++		},
++	)
 +	if err != nil {
 +		return nil, 0, ebzkratos.New(pb.ErrorServerError("list: %v", err))
  	}
@@ -274,8 +284,7 @@ Code differences compared to source project.
 +			StudentID: v.V学生ID,
 +		})
  	}
--	return items, int32(total), nil
-+	return items, int32(len(items)), nil
+ 	return items, int32(total), nil
  }
  
 -// ListStudentArticles returns one student's articles, one page at a time. The
@@ -286,12 +295,13 @@ Code differences compared to source project.
 -// 而不是往 ListArticles 上塞过滤参数。
  func (uc *ArticleUsecase) ListStudentArticles(ctx context.Context, studentID int64, page int32, pageSize int32) ([]*Article, int32, *ebzkratos.Ebz) {
  	must.True(studentID > 0)
--	if page < 1 {
--		page = 1
--	}
--	if pageSize < 1 {
--		pageSize = 10
--	}
++
+ 	if page < 1 {
+ 		page = 1
+ 	}
+@@ -181,16 +174,34 @@
+ 		pageSize = 10
+ 	}
  
 -	db := uc.data.DB().WithContext(ctx)
 +	db := uc.data.DB()
@@ -299,10 +309,20 @@ Code differences compared to source project.
 -	var total int64
 -	if err := db.Model(&Article{}).Where("student_id = ?", studentID).Count(&total).Error; err != nil {
 -		return nil, 0, ebzkratos.New(pb.ErrorDbError("count student articles: %v", err))
-+	// 用 gormrepo Find 加类型安全的 student_id 过滤，演示关联查询
-+	v文章们, err := uc.repo.With(ctx, db).Find(func(db *gorm.DB, cls *models.T文章Columns) *gorm.DB {
-+		return db.Where(cls.V学生ID.Eq(studentID)).Order(cls.ID.Ob("DESC").Ox())
-+	})
++	// gormrepo FindPageAndCount 加类型安全的 student_id 过滤：带分页的关联查询
++	// 仍是一个类型安全的调用，替掉桩子里手写的 Where + Count + Offset + Limit
++	v文章们, total, err := uc.repo.With(ctx, db).FindPageAndCount(
++		func(db *gorm.DB, cls *models.T文章Columns) *gorm.DB {
++			return db.Where(cls.V学生ID.Eq(studentID))
++		},
++		func(cls *models.T文章Columns) gormcnm.OrderByBottle {
++			return cls.ID.Ob("asc")
++		},
++		&gormrepo.Pagination{
++			Offset: int((page - 1) * pageSize),
++			Limit:  int(pageSize),
++		},
++	)
 +	if err != nil {
 +		return nil, 0, ebzkratos.New(pb.ErrorServerError("list student articles: %v", err))
  	}
@@ -319,8 +339,7 @@ Code differences compared to source project.
 +			StudentID: v.V学生ID,
 +		})
  	}
--	return items, int32(total), nil
-+	return items, int32(len(items)), nil
+ 	return items, int32(total), nil
  }
 ```
 
