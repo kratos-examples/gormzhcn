@@ -22,7 +22,7 @@ func NewData(c *conf.Data, logger *slog.Logger) (*Data, func(), error) {
 	must.Same(c.Database.Driver, "postgres")
 	db := rese.P1(gorm.Open(postgres.Open(c.Database.Source), &gorm.Config{}))
 
-	must.Done(db.AutoMigrate(&models.T学生{}))
+	must.Done(db.AutoMigrate(&models.T学生{}, &models.T文章{}))
 
 	cleanup := func() {
 		logger.Info("closing the data resources")

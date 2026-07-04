@@ -15,6 +15,7 @@ import (
 	"github.com/yylego/kratos-gorm/gormkratos"
 	"github.com/yylego/must"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Student struct {
@@ -27,14 +28,18 @@ type Student struct {
 type StudentUsecase struct {
 	data *data.Data
 	repo *gormrepo.Repo[models.T学生, *models.T学生Columns]
-	log  *slog.Logger
+	// The mirrored article repo backs the cascade delete; the two services share one database.
+	// 镜像的文章 repo 用于级联删除；两个服务共用一个库。
+	repoArticle *gormrepo.Repo[models.T文章, *models.T文章Columns]
+	log         *slog.Logger
 }
 
 func NewStudentUsecase(data *data.Data, logger *slog.Logger) *StudentUsecase {
 	return &StudentUsecase{
-		data: data,
-		repo: gormrepo.NewRepo(gormclass.Use(&models.T学生{})),
-		log:  logger,
+		data:        data,
+		repo:        gormrepo.NewRepo(gormclass.Use(&models.T学生{})),
+		repoArticle: gormrepo.NewRepo(gormclass.Use(&models.T文章{})),
+		log:         logger,
 	}
 }
 
@@ -43,25 +48,28 @@ func (uc *StudentUsecase) CreateStudent(ctx context.Context, s *Student) (*Stude
 
 	db := uc.data.DB()
 
-	var v学生 *models.T学生
-
+	var student *models.T学生
 	if erk, err := gormkratos.Transaction(ctx, db, func(db *gorm.DB) *errors.Error {
-		v学生 = &models.T学生{
+		student = &models.T学生{
 			V名字: s.Name,
+			V年龄: s.Age,
+			V班级: s.ClassName,
 		}
-		if err := uc.repo.With(ctx, db).Create(v学生); err != nil {
-			return errors.New(500, "DB_ERROR", err.Error())
+		if err := uc.repo.With(ctx, db).Create(student); err != nil {
+			return pb.ErrorStudentCreateFailure("create student: %v", err)
 		}
 		return nil
 	}); err != nil {
 		if erk != nil {
 			return nil, ebzkratos.New(erk)
 		}
-		return nil, ebzkratos.New(pb.ErrorServerError("tx: %v", err))
+		return nil, ebzkratos.New(pb.ErrorTxError("tx: %v", err))
 	}
 	return &Student{
-		ID:   int64(v学生.ID),
-		Name: v学生.V名字,
+		ID:        int64(student.ID),
+		Name:      student.V名字,
+		Age:       student.V年龄,
+		ClassName: student.V班级,
 	}, nil
 }
 
@@ -71,12 +79,23 @@ func (uc *StudentUsecase) UpdateStudent(ctx context.Context, s *Student) (*Stude
 
 	db := uc.data.DB()
 
+	// Confirm the student exists first, matching the stump: a missing row yields StudentNotFound.
+	// 先确认学生存在，对齐桩子：查不到返回 StudentNotFound 而非静默成功。
+	if _, erb := uc.repo.With(ctx, db).FirstE(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
+		return db.Where(cls.ID.Eq(uint(s.ID)))
+	}); erb != nil {
+		if erb.NotExist {
+			return nil, ebzkratos.New(pb.ErrorStudentNotFound("student %d not found", s.ID))
+		}
+		return nil, ebzkratos.New(pb.ErrorDbError("get student: %v", erb.Cause))
+	}
+
 	if err := uc.repo.With(ctx, db).UpdatesM(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
 		return db.Where(cls.ID.Eq(uint(s.ID)))
 	}, func(cls *models.T学生Columns) gormcnm.ColumnValueMap {
-		return cls.Kw(cls.V名字.Kv(s.Name))
+		return cls.Kw(cls.V名字.Kv(s.Name)).Kw(cls.V年龄.Kv(s.Age)).Kw(cls.V班级.Kv(s.ClassName))
 	}); err != nil {
-		return nil, ebzkratos.New(pb.ErrorServerError("update: %v", err))
+		return nil, ebzkratos.New(pb.ErrorDbError("update student: %v", err))
 	}
 
 	return s, nil
@@ -87,10 +106,41 @@ func (uc *StudentUsecase) DeleteStudent(ctx context.Context, id int64) *ebzkrato
 
 	db := uc.data.DB()
 
-	if err := uc.repo.With(ctx, db).DeleteW(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
-		return db.Where(cls.ID.Eq(uint(id)))
+	// Translate the stump's atomic cascade delete, in one transaction:
+	//   ① FOR UPDATE lock the student row (a concurrent CreateArticle holds FOR SHARE, so the two serialize);
+	//   ② delete the student's articles (children first);
+	//   ③ delete the student (parent last).
+	// 翻译桩子的原子级联删除，全在一个事务里：①FOR UPDATE 锁学生行 ②先删文章 ③再删学生。
+	var notFound bool
+	if erk, err := gormkratos.Transaction(ctx, db, func(db *gorm.DB) *errors.Error {
+		if _, erb := uc.repo.With(ctx, db).FirstE(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
+			return db.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where(cls.ID.Eq(uint(id)))
+		}); erb != nil {
+			if erb.NotExist {
+				notFound = true
+				return nil
+			}
+			return pb.ErrorDbError("get student: %v", erb.Cause)
+		}
+		if err := uc.repoArticle.With(ctx, db).DeleteW(func(db *gorm.DB, cls *models.T文章Columns) *gorm.DB {
+			return db.Where(cls.V学生ID.Eq(id))
+		}); err != nil {
+			return pb.ErrorDbError("delete articles: %v", err)
+		}
+		if err := uc.repo.With(ctx, db).DeleteW(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
+			return db.Where(cls.ID.Eq(uint(id)))
+		}); err != nil {
+			return pb.ErrorDbError("delete student: %v", err)
+		}
+		return nil
 	}); err != nil {
-		return ebzkratos.New(pb.ErrorServerError("delete: %v", err))
+		if erk != nil {
+			return ebzkratos.New(erk)
+		}
+		return ebzkratos.New(pb.ErrorTxError("delete student with articles: %v", err))
+	}
+	if notFound {
+		return ebzkratos.New(pb.ErrorStudentNotFound("student %d not found", id))
 	}
 	return nil
 }
@@ -100,19 +150,21 @@ func (uc *StudentUsecase) GetStudent(ctx context.Context, id int64) (*Student, *
 
 	db := uc.data.DB()
 
-	v学生, erb := uc.repo.With(ctx, db).FirstE(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
+	student, erb := uc.repo.With(ctx, db).FirstE(func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
 		return db.Where(cls.ID.Eq(uint(id)))
 	})
 	if erb != nil {
 		if erb.NotExist {
-			return nil, ebzkratos.New(pb.ErrorServerError("not found: %v", erb.Cause))
+			return nil, ebzkratos.New(pb.ErrorStudentNotFound("student %d not found", id))
 		}
-		return nil, ebzkratos.New(pb.ErrorServerError("db: %v", erb.Cause))
+		return nil, ebzkratos.New(pb.ErrorDbError("get student: %v", erb.Cause))
 	}
 
 	return &Student{
-		ID:   int64(v学生.ID),
-		Name: v学生.V名字,
+		ID:        int64(student.ID),
+		Name:      student.V名字,
+		Age:       student.V年龄,
+		ClassName: student.V班级,
 	}, nil
 }
 
@@ -126,11 +178,10 @@ func (uc *StudentUsecase) ListStudents(ctx context.Context, page int32, pageSize
 
 	db := uc.data.DB()
 
-	// gormrepo FindPageAndCount replaces the stump's hand-written Count + Order + Offset + Limit
-	// with one typed call that returns the current page plus the total row count together.
-	// gormrepo 的 FindPageAndCount 把桩子里手写的 Count + Order + Offset + Limit
-	// 收敛成一个类型安全的调用：一次拿到当页数据和总行数
-	v学生们, total, err := uc.repo.With(ctx, db).FindPageAndCount(
+	// gormrepo FindPageAndCount returns the page and the row count in one shot,
+	// replacing the stump's hand-written Count + order + offset + limit.
+	// gormrepo 的 FindPageAndCount 一次拿到当页数据和总行数。
+	students, total, err := uc.repo.With(ctx, db).FindPageAndCount(
 		func(db *gorm.DB, cls *models.T学生Columns) *gorm.DB {
 			return db
 		},
@@ -143,14 +194,16 @@ func (uc *StudentUsecase) ListStudents(ctx context.Context, page int32, pageSize
 		},
 	)
 	if err != nil {
-		return nil, 0, ebzkratos.New(pb.ErrorServerError("list: %v", err))
+		return nil, 0, ebzkratos.New(pb.ErrorDbError("list students: %v", err))
 	}
 
-	items := make([]*Student, 0, len(v学生们))
-	for _, v := range v学生们 {
+	items := make([]*Student, 0, len(students))
+	for _, v := range students {
 		items = append(items, &Student{
-			ID:   int64(v.ID),
-			Name: v.V名字,
+			ID:        int64(v.ID),
+			Name:      v.V名字,
+			Age:       v.V年龄,
+			ClassName: v.V班级,
 		})
 	}
 	return items, int32(total), nil

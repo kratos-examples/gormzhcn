@@ -2,6 +2,8 @@ package models
 
 import "gorm.io/gorm"
 
+// T学生 与 demo1kratos 的 students 表结构一致。这里是文章服务、不拥有学生表，
+// 保留这份镜像仅用于建文章前校验学生存在（两服务共用一个库）。
 type T学生 struct {
 	gorm.Model
 	V名字 string `gorm:"column:name;type:varchar(255)" cnm:"V名字"`
